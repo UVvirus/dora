@@ -1,164 +1,94 @@
-import json
-import subprocess
-import signal
-import sys
-from shutil import which
-import argparse
 import os
-from dora.printer import Printer 
+import tldextract
+import requests
+import re
+from bs4 import BeautifulSoup
+import json
+
+API_KEY = os.environ.get("API_KEY")
 
 
-def ripgrep(regex, path, rg_path, rg_arguments, rg_args_from_json_data):
-    if not color:
-        rg_arguments = f"{rg_arguments} --color=never"
+def shodan_cli(hostname: str, filename: str):
+    try:
+        os.mkdir(filename)
+        os.chdir(filename)
+        run_cmd = f"shodan download --limit 100 {filename}_results hostname:{hostname}"
+        os.system(run_cmd)
+        parse_cmd = f"shodan parse --fields hostnames --separator , {filename}_results.json.gz > {filename}.json"
+        os.system(parse_cmd)
+        getting_response(hostname, filename)
 
-    if rg_args_from_json_data:
-        rg_arguments = f"{rg_arguments} {rg_args_from_json_data}"
-
-    global command
-    command = f"{rg_path} {rg_arguments} -- \"{regex}\" \"{path}\""
-
-    output, error = subprocess.Popen(command,
-                                     stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE,
-                                     shell=True
-                                     ).communicate()
-
-    output = output.decode("utf-8").rstrip("\r\n")
-    error = error.decode("utf-8")
-    return output, error, command
+    except Exception as e:
+        # print(e)
+        init_cmd(hostname, filename)
 
 
-def exit_gracefully(signum, frame):
-    # Erase the current line and return the cursor to the beginning
-    print("\033[2K", end="\r", flush=True)
-    printer.bad("Scan got interrupted by CTRL-C")
-    sys.exit(1)
+def init_cmd(hostname: str, filename: str):
+    shodan_init_cmd = f"shodan init {API_KEY}"
+    os.system(shodan_init_cmd)
+    shodan_cli(hostname, filename)
 
 
-def main():
-    # Get the full path of the directory where this file file
-    # is located. This is needed so that we can fetch data.json
-    dora_path = os.path.dirname(os.path.realpath(__file__))
+def parsing_list_of_domain_names(filename: str):
+    with open(f"{filename}.json", 'r') as file:
+        # with open("test.json", 'r') as file:
+        readed_file = file.read()
+        replacing_semicolon = readed_file.replace(";", "\n")
+        list_of_domain_names = replacing_semicolon.split("\n")
+        print(list_of_domain_names)
+    file.close()
+    return list_of_domain_names
 
-    parser = argparse.ArgumentParser(usage="%(prog)s [options]")
 
-    parser.add_argument("path",
-                        metavar='PATH',
-                        action="store",
-                        help="Path to directory or file to scan"
-                        )
+def getting_response(hostname: str, filename: str):
+    list_of_domains = parsing_list_of_domain_names(filename)
 
-    parser.add_argument("--rg-path",
-                        action="store",
-                        default=which("rg"),
-                        help="Specify path to ripgrep"
-                        )
+    for domain in list_of_domains:
+        if "http://" or "https://" not in domain:
+            # domain = "https://stg.rds.9c9media.ca"  # + domain
+            domain = "https://" + domain
+            try:
+                response = requests.get(url=domain, timeout=5)
+                if response.status_code == 200:
+                    print("working:", domain)
+                    page_source = response.text
+                    save_scraped_results_in_a_file(hostname, page_source)
 
-    parser.add_argument("--rg-arguments",
-                        action="store",
-                        default="--pretty",
-                        help="Arguments you want to provide to ripgrep"
-                        )
+            except Exception as error:
+                print(error)
+                pass
 
-    parser.add_argument("--json",
-                        action="store",
-                        default=f"{dora_path}/db/data.json",
-                        help="Load regex data from a valid JSON file (default: db/data.json)"
-                        )
 
-    parser.add_argument("--verbose", "-v", "--debug", "-d",
-                        action="store_true",
-                        default=False,
-                        help="Display extra debugging information"
-                        )
+def extract_domainName(hostname: str):
+    tld = tldextract.extract(hostname)
+    domain_name = tld.domain
+    return domain_name
 
-    parser.add_argument("--no-color",
-                        action="store_true",
-                        default=False,
-                        help="Don't show color in terminal output"
-                        )
 
-    args = parser.parse_args()
+def save_scraped_results_in_a_file(hostname: str, page_source):
+    with open(hostname, "w") as file:
+        file.writelines(page_source)
+    file.close()
 
-    # Catch SIGINT (also known as CTRL-C) and exit gracefully
-    signal.signal(signal.SIGINT, exit_gracefully)
 
-    global color
-    color = not args.no_color
-    path = args.path
-    json_data = args.json
-    rg_path = args.rg_path
-    rg_arguments = args.rg_arguments
-    verbose = args.verbose
+def ripgrep(folder_name: str):
+    with open("regex_keys.json", "r") as json_file:
+        json_data = json.loads(json_file.read())
 
-    # Create a printer object for displaying text.
-    # We are making this global because exit_gracefully() also
-    # requires this object in order to display the exit message.
-    global printer
-    printer = Printer(color=color, verbose=verbose)
+        for item in json_data:
+            service_name = item.strip()
 
-    if which("rg") is None:
-        printer.negative("Is ripgrep installed?")
-        # Yes, I could use one print_content() function and triple quotes to have this
-        # message span multiple lines, but that reduces the legibility of the code.
-        printer.content("The ripgrep (rg) binary couldn't be found. Try specifying the path")
-        printer.content("to 'rg' by using '--rg-path /path/to/rg'")
-        printer.content("You can install it from here: https://github.com/BurntSushi/ripgrep")
-        sys.exit(1)
+            regex = json_data.get(service_name).get("regex")
+            grep_cmd = f"rg {regex} {folder_name}"
+            os.system(grep_cmd)
 
-    if verbose:
-        printer.info(f"Path to ripgrep: {rg_path}")
-        printer.info(f"RegEx source: {json_data}")
-
-    with open(json_data, "r") as f:
-        try:
-            data = json.loads(f.read())
-        except json.decoder.JSONDecodeError as e:
-            printer.warning("Provided JSON data is invalid")
-            printer.content(str(e))
-            sys.exit(1)
-
-        for item in data:
-            regex = item.strip()
-            service_name = item
-
-            regex = data.get(service_name).get("regex")
-            # Awfully long variable name, I know. I'm open for suggestions.
-            rg_args_from_json_data = data.get(service_name).get("flags")
-            info = data.get(service_name).get("info")
-
-            printer.info(f"Checking for {service_name or regex}")
-            output, error, command = ripgrep(regex=regex, path=path, rg_path=rg_path, rg_arguments=rg_arguments, rg_args_from_json_data=rg_args_from_json_data)
-
-            if verbose:
-                printer.info(f"{command}\n")
-
-            # Erase the current line and return the cursor to the beginning.
-            # This has no effect on the terminal output when --verbose is set
-            # and that is because of the extra newline (\n) while showing
-            # the ripgrep command.
-            print("\033[2K", end="\r", flush=True)
-
-            if error:
-                printer.warning("Error from ripgrep")
-                printer.content(error)
-                printer.content(f"\nThe command that caused the error:\n $ {command}")
-                sys.exit()
-
-            if output:
-                printer.positive(f"{service_name or regex}")
-
-                if info is not None:
-                    printer.content(info)
-
-                printer.content(output)
-
-                # Adding a spacer to the output for better legibility
-                print("\n")
-
-    printer.good("Scan has been completed!")
+    json_file.close()
 
 
 if __name__ == "__main__":
-    main()
+    # name_of_the_file=extract_domainName("epic.ca")
+    # shodan_cli("epic.ca", name_of_the_file)
+    # parsing_logic("test")
+    # extract_domainName("epic.ca")
+    # getting_response("epic.ca")
+    ripgrep()
